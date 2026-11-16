@@ -12114,7 +12114,23 @@ local function camReset(cam)
     end)
 end
 
+-- Auto Scrap / Auto Mine must never take ownership of the player's camera.
+-- These modes move the character independently; forcing Scriptable CFrames can leave
+-- the view behind in the air while the character continues along the route.
+function S.isCollectorCameraSuppressed()
+    local AO = S.AutoOres
+    return Autofarm.scrapSweep == true or (AO and AO.owned == true)
+end
+
 function S.aimCameraAtWorld(worldPos, saved)
+    if S.isCollectorCameraSuppressed() then
+        -- If an earlier routine left Scriptable enabled, hand the camera back once.
+        local cam = Workspace.CurrentCamera
+        if cam and cam.CameraType == Enum.CameraType.Scriptable then
+            camReset(cam)
+        end
+        return nil
+    end
     local cam = Workspace.CurrentCamera
     if not cam or not worldPos then
         return saved
@@ -12211,7 +12227,19 @@ task.spawn(function()
         task.wait(0.5)
         local A = S._camAim
         local cam = Workspace.CurrentCamera
-        if cam and A.touched and os.clock() - A.lastAt > 1.2 then
+        if cam and S.isCollectorCameraSuppressed() then
+            -- A hard guard for Auto Scrap / Auto Mine: never let a stale Scriptable
+            -- camera survive while the avatar is being moved by the collector.
+            if cam.CameraType == Enum.CameraType.Scriptable then
+                camReset(cam)
+            end
+            if A then
+                A.count = 0
+                A.orig = nil
+                A.touched = false
+                A.lastAt = 0
+            end
+        elseif cam and A.touched and os.clock() - A.lastAt > 1.2 then
             A.count = 0
             A.orig = nil
             A.touched = false
@@ -16897,6 +16925,11 @@ end
 
 -- Cam through walls + longer zoom while autofarming.
 function S.setAutofarmCameraAssist(enabled)
+    if enabled and S.isCollectorCameraSuppressed() then
+        -- Do not expand the zoom range for Auto Scrap / Auto Mine. A very large
+        -- camera distance makes the view appear detached even when Roblox owns it.
+        return
+    end
     if enabled then
         if Autofarm.ownedCamAssist then
             return
@@ -26413,6 +26446,7 @@ function S.setAutoMineOres(enabled)
         Autofarm._farmShuttingDown = false
         AO.saved = S.snapshotScrapSettings()
         AO.owned = true
+        pcall(S.releaseAutofarmCamera)
         Autofarm.scrapSweep = false
         Autofarm.openChests = false
         Autofarm.enterMines = true
@@ -30668,6 +30702,7 @@ function S.setScrapSweep(enabled)
         SW.saved = S.snapshotScrapSettings()
         SW.saved.sellThreshold = Autofarm.sellThreshold
         SW.owned = true
+        pcall(S.releaseAutofarmCamera)
         S.applyScrapSweepSettings()
         Autofarm.distance = 0
         S.resetAutofarmStart()
