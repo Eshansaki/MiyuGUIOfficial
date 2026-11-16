@@ -12124,11 +12124,8 @@ end
 
 function S.aimCameraAtWorld(worldPos, saved)
     if S.isCollectorCameraSuppressed() then
-        -- If an earlier routine left Scriptable enabled, hand the camera back once.
-        local cam = Workspace.CurrentCamera
-        if cam and cam.CameraType == Enum.CameraType.Scriptable then
-            camReset(cam)
-        end
+        -- Collector modes never take camera ownership. Do not reset CameraType,
+        -- CameraSubject, or CFrame here: that can fight the player's camera input.
         return nil
     end
     local cam = Workspace.CurrentCamera
@@ -12178,19 +12175,21 @@ function S.restoreCameraAim(saved)
         return -- another feature is still aiming; the last one restores the camera
     end
     pcall(function()
-        -- Always hand the view back to Roblox's character camera controller.
-        -- Restoring a cached CFrame here can pin the camera at an old airborne
-        -- position while the character has already moved on. It also overwrites
-        -- the player's own camera movement made during the automated pickup.
+        -- Restore only the controller and subject that were active before this
+        -- script aimed the camera. Never restore a cached CFrame.
+        local orig = A.orig or saved
+        local originalType = orig.cameraType
+        if originalType == nil or originalType == Enum.CameraType.Scriptable then
+            originalType = Enum.CameraType.Custom
+        end
+        cam.CameraType = originalType
+
+        local subject = orig.subject
         local hum = camHumanoid()
-        cam.CameraType = Enum.CameraType.Custom
-        if hum then
+        if subject and subject.Parent then
+            cam.CameraSubject = subject
+        elseif hum then
             cam.CameraSubject = hum
-        else
-            local subject = saved.subject
-            if subject and subject.Parent then
-                cam.CameraSubject = subject
-            end
         end
     end)
     A.touched = false
@@ -12202,70 +12201,42 @@ end
 -- a cached CFrame, which can leave the camera suspended at an old airborne position.
 function S.releaseAutofarmCamera()
     local A = S._camAim
-    if A then
-        A.count = 0
-        A.orig = nil
-        A.touched = false
-        A.lastAt = 0
+    if not A or not A.touched then
+        -- Auto Mine can call this after every pass. If it never aimed the camera,
+        -- leave the player's current camera controller and subject completely alone.
+        return
     end
+
+    A.count = 0
+    local orig = A.orig
+    A.orig = nil
+    A.touched = false
+    A.lastAt = 0
+
     local cam = Workspace.CurrentCamera
     if not cam then
         return
     end
     pcall(function()
-        cam.CameraType = Enum.CameraType.Custom
+        local originalType = orig and orig.cameraType
+        if originalType == nil or originalType == Enum.CameraType.Scriptable then
+            originalType = Enum.CameraType.Custom
+        end
+        cam.CameraType = originalType
+
+        local subject = orig and orig.subject
         local hum = camHumanoid()
-        if hum then
+        if subject and subject.Parent then
+            cam.CameraSubject = subject
+        elseif hum then
             cam.CameraSubject = hum
         end
     end)
 end
 
--- Per-frame camera ownership guard for Auto Scrap / Auto Mine.
--- A half-second watchdog is too slow: another pickup coroutine can switch the
--- camera back between checks, leaving it detached while the avatar keeps moving.
--- This guard never writes Camera.CFrame, so the player's manual camera angle is kept.
-local COLLECTOR_CAMERA_GUARD = "MiyuGUI_CollectorCameraGuard"
-pcall(function()
-    RunService:UnbindFromRenderStep(COLLECTOR_CAMERA_GUARD)
-    RunService:BindToRenderStep(COLLECTOR_CAMERA_GUARD, Enum.RenderPriority.Last.Value, function()
-        if S._unloading or not S.isCollectorCameraSuppressed() then
-            return
-        end
-        local cam = Workspace.CurrentCamera
-        local hum = camHumanoid()
-        if not cam or not hum then
-            return
-        end
-        -- Only repair controller ownership/subject; do not touch the live CFrame.
-        pcall(function()
-            if cam.CameraType ~= Enum.CameraType.Custom then
-                cam.CameraType = Enum.CameraType.Custom
-            end
-            if cam.CameraSubject ~= hum then
-                cam.CameraSubject = hum
-            end
-        end)
-        local A = S._camAim
-        if A then
-            A.count = 0
-            A.orig = nil
-            A.touched = false
-            A.lastAt = 0
-        end
-    end)
-end)
-
--- Also release any stale aim immediately when the collector mode is turned off.
-
-task.spawn(function()
-    while not S._unloading do
-        task.wait(1)
-    end
-    pcall(function()
-        RunService:UnbindFromRenderStep(COLLECTOR_CAMERA_GUARD)
-    end)
-end)
+-- No per-frame camera watchdog is used. Collector pickup routines are prevented
+-- from aiming the camera at source; forcing CameraType/CameraSubject every frame
+-- interferes with the built-in camera controller and manual camera movement.
 
 -- Soften prompt eligibility for hold only. Never touch HoldDuration.
 function S.preparePromptsForHold(prompts)
