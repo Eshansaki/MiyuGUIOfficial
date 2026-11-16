@@ -30475,6 +30475,75 @@ function S.holdFKey(seconds, tick)
     return completed
 end
 
+-- Freeze only the camera view during the actual Hold-F bag drop.
+-- Character movement is not frozen. The camera is restored to Roblox's normal
+-- character controller immediately after the hold ends; the old CFrame is never replayed.
+function S.beginDropCameraFreeze()
+    local cam = Workspace.CurrentCamera
+    if not cam then
+        return nil
+    end
+
+    local token = {
+        camera = cam,
+        cframe = cam.CFrame,
+        cameraType = cam.CameraType,
+        subject = cam.CameraSubject,
+        active = true,
+    }
+    if token.cameraType == Enum.CameraType.Scriptable then
+        token.cameraType = Enum.CameraType.Custom
+    end
+
+    pcall(function()
+        cam.CameraType = Enum.CameraType.Scriptable
+        cam.CFrame = token.cframe
+    end)
+
+    token.connection = RunService.RenderStepped:Connect(function()
+        if not token.active then
+            return
+        end
+        local current = Workspace.CurrentCamera
+        if current and current == token.camera then
+            pcall(function()
+                current.CameraType = Enum.CameraType.Scriptable
+                current.CFrame = token.cframe
+            end)
+        end
+    end)
+
+    return token
+end
+
+function S.endDropCameraFreeze(token)
+    if not token then
+        return
+    end
+    token.active = false
+    if token.connection then
+        pcall(function() token.connection:Disconnect() end)
+        token.connection = nil
+    end
+
+    local cam = Workspace.CurrentCamera
+    if not cam then
+        return
+    end
+    pcall(function()
+        local subject = token.subject
+        local hum = camHumanoid()
+        cam.CameraType = token.cameraType or Enum.CameraType.Custom
+        if subject and subject.Parent then
+            cam.CameraSubject = subject
+        elseif hum then
+            cam.CameraSubject = hum
+        end
+        -- Intentionally do not write token.cframe here. Roblox resumes following
+        -- the live character position instead of returning to a stale camera pose.
+    end)
+end
+
 -- Đứng trên pad rồi giữ F. Trả về số món đã thả.
 function S.dumpBagHoldF(part, label, opts)
     opts = type(opts) == "table" and opts or {}
@@ -30516,7 +30585,15 @@ function S.dumpBagHoldF(part, label, opts)
     local after = before
     for round = 1, math.max(1, tonumber(S.HoldDrop.maxRounds) or 1) do
         S.notify(tostring(label or "Drop"), "Holding F " .. tostring(S.HoldDrop.seconds) .. "s (round " .. round .. ")", 3)
-        local completed = S.holdFKey(S.HoldDrop.seconds, tick)
+        -- Freeze the current camera angle only while F is being held. The avatar
+        -- and drop logic continue normally; the player's camera input resumes after.
+        local cameraFreeze = S.beginDropCameraFreeze()
+        local holdOk, completedOrError = pcall(S.holdFKey, S.HoldDrop.seconds, tick)
+        S.endDropCameraFreeze(cameraFreeze)
+        local completed = holdOk and completedOrError == true
+        if not holdOk then
+            warn("[TERRA HUB] Hold-F drop failed: " .. tostring(completedOrError))
+        end
         task.wait(0.6)
         pcall(function()
             local update = Services.ToolService and Services.ToolService.Update
