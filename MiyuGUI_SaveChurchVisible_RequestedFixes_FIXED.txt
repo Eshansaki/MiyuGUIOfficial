@@ -17111,8 +17111,15 @@ function S.autofarmDumpBagToDrill()
         local startFill = S.getBagFillCount()
         if startFill <= 0 then return 0 end
         local dumped = 0
+        -- Keep one camera freeze across BOTH the Hold-F drop and the return to
+        -- the saved mining pocket. The inner Hold-F helper must not release it.
+        local cameraFreeze = S.beginDropCameraFreeze()
         local okDump, result = pcall(function()
-            return S.dumpBagOntoPart(bed, "Drill", nil, { force = false, forceHoldF = true })
+            return S.dumpBagOntoPart(bed, "Drill", nil, {
+                force = false,
+                forceHoldF = true,
+                keepCameraFrozen = true,
+            })
         end)
         if okDump then dumped = tonumber(result) or 0 end
         Money.trackedBagSize = S.getBagFillCount()
@@ -17122,7 +17129,11 @@ function S.autofarmDumpBagToDrill()
             S.returnToAutofarmPocket()
             S.ensureAutofarmAntiFall(true)
             S.lockAutofarmHover(true)
+            -- Allow the character/root to finish its pocket reposition before
+            -- the frozen view is released back to Roblox's camera controller.
+            task.wait(0.35)
         end
+        S.endDropCameraFreeze(cameraFreeze)
         if Money.trackedBagSize > 0 then
             S.notify("Auto Mine", "Hold-F dropped " .. tostring(dumped) .. " · bag still " .. tostring(Money.trackedBagSize), 4)
         else
@@ -30602,9 +30613,14 @@ function S.dumpBagHoldF(part, label, opts)
         S.notify(tostring(label or "Drop"), "Holding F " .. tostring(S.HoldDrop.seconds) .. "s (round " .. round .. ")", 3)
         -- Freeze the current camera angle only while F is being held. The avatar
         -- and drop logic continue normally; the player's camera input resumes after.
-        local cameraFreeze = S.beginDropCameraFreeze()
+        local cameraFreeze = nil
+        if not opts.keepCameraFrozen then
+            cameraFreeze = S.beginDropCameraFreeze()
+        end
         local holdOk, completedOrError = pcall(S.holdFKey, S.HoldDrop.seconds, tick)
-        S.endDropCameraFreeze(cameraFreeze)
+        if cameraFreeze then
+            S.endDropCameraFreeze(cameraFreeze)
+        end
         local completed = holdOk and completedOrError == true
         if not holdOk then
             warn("[TERRA HUB] Hold-F drop failed: " .. tostring(completedOrError))
