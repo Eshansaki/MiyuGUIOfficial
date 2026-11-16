@@ -30484,11 +30484,17 @@ function S.beginDropCameraFreeze()
         return nil
     end
 
+    local root = S.getRoot()
     local token = {
         camera = cam,
         cframe = cam.CFrame,
         cameraType = cam.CameraType,
         subject = cam.CameraSubject,
+        root = root,
+        -- Store the view relative to the avatar, not as a world-space position.
+        -- Auto Mine may move the avatar after the drop; this prevents an airborne
+        -- camera from being left behind at the old drill/shredder location.
+        rootRelative = (root and root.CFrame:ToObjectSpace(cam.CFrame)) or nil,
         active = true,
     }
     if token.cameraType == Enum.CameraType.Scriptable then
@@ -30533,14 +30539,23 @@ function S.endDropCameraFreeze(token)
     pcall(function()
         local subject = token.subject
         local hum = camHumanoid()
+        local root = S.getRoot()
+
+        -- Rebase the frozen view onto the avatar's CURRENT position before
+        -- returning camera ownership. Auto Mine can teleport back to its pocket
+        -- immediately after the dump, so never leave the camera at the drill.
+        if root and token.rootRelative then
+            local rebased = root.CFrame * token.rootRelative
+            cam.CFrame = rebased
+            cam.Focus = CFrame.new(root.Position)
+        end
+
         cam.CameraType = token.cameraType or Enum.CameraType.Custom
         if subject and subject.Parent then
             cam.CameraSubject = subject
         elseif hum then
             cam.CameraSubject = hum
         end
-        -- Intentionally do not write token.cframe here. Roblox resumes following
-        -- the live character position instead of returning to a stale camera pose.
     end)
 end
 
