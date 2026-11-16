@@ -12221,33 +12221,50 @@ function S.releaseAutofarmCamera()
     end)
 end
 
--- Safety net: if the camera was left Scriptable by an aim that never got restored, free it.
-task.spawn(function()
-    while not S._unloading do
-        task.wait(0.5)
-        local A = S._camAim
+-- Per-frame camera ownership guard for Auto Scrap / Auto Mine.
+-- A half-second watchdog is too slow: another pickup coroutine can switch the
+-- camera back between checks, leaving it detached while the avatar keeps moving.
+-- This guard never writes Camera.CFrame, so the player's manual camera angle is kept.
+local COLLECTOR_CAMERA_GUARD = "MiyuGUI_CollectorCameraGuard"
+pcall(function()
+    RunService:UnbindFromRenderStep(COLLECTOR_CAMERA_GUARD)
+    RunService:BindToRenderStep(COLLECTOR_CAMERA_GUARD, Enum.RenderPriority.Last.Value, function()
+        if S._unloading or not S.isCollectorCameraSuppressed() then
+            return
+        end
         local cam = Workspace.CurrentCamera
-        if cam and S.isCollectorCameraSuppressed() then
-            -- A hard guard for Auto Scrap / Auto Mine: never let a stale Scriptable
-            -- camera survive while the avatar is being moved by the collector.
-            if cam.CameraType == Enum.CameraType.Scriptable then
-                camReset(cam)
+        local hum = camHumanoid()
+        if not cam or not hum then
+            return
+        end
+        -- Only repair controller ownership/subject; do not touch the live CFrame.
+        pcall(function()
+            if cam.CameraType ~= Enum.CameraType.Custom then
+                cam.CameraType = Enum.CameraType.Custom
             end
-            if A then
-                A.count = 0
-                A.orig = nil
-                A.touched = false
-                A.lastAt = 0
+            if cam.CameraSubject ~= hum then
+                cam.CameraSubject = hum
             end
-        elseif cam and A.touched and os.clock() - A.lastAt > 1.2 then
+        end)
+        local A = S._camAim
+        if A then
             A.count = 0
             A.orig = nil
             A.touched = false
-            if cam.CameraType == Enum.CameraType.Scriptable then
-                camReset(cam)
-            end
+            A.lastAt = 0
         end
+    end)
+end)
+
+-- Also release any stale aim immediately when the collector mode is turned off.
+
+task.spawn(function()
+    while not S._unloading do
+        task.wait(1)
     end
+    pcall(function()
+        RunService:UnbindFromRenderStep(COLLECTOR_CAMERA_GUARD)
+    end)
 end)
 
 -- Soften prompt eligibility for hold only. Never touch HoldDuration.
