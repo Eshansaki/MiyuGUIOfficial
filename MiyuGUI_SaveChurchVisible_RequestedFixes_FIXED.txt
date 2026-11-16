@@ -10679,8 +10679,11 @@ function S.dumpBagOntoPart(part, label, itemFilter, opts)
         end
     end
 
-    -- Shredder: giữ F (mặc định 7s) thay cho vòng lặp thả từng món.
-    if S.HoldDrop and S.HoldDrop.enabled and tostring(label or "") == "Shredder" then
+    -- Shredder và Drill: dùng cùng cơ chế giữ F của Auto Scrap để thả cả túi.
+    local dumpLabel = tostring(label or "")
+    if (S.HoldDrop and S.HoldDrop.enabled or opts.forceHoldF == true)
+        and (dumpLabel == "Shredder" or dumpLabel == "Drill")
+    then
         return S.dumpBagHoldF(part, label, opts), 0
     end
 
@@ -12159,24 +12162,47 @@ function S.restoreCameraAim(saved)
         return -- another feature is still aiming; the last one restores the camera
     end
     pcall(function()
-        local t = saved.cameraType
-        if not t or t == Enum.CameraType.Scriptable then
-            t = Enum.CameraType.Custom
-        end
-        cam.CameraType = t
-        local subject = saved.subject
-        if not subject or not subject.Parent then
-            subject = camHumanoid()
-        end
-        if subject then
-            cam.CameraSubject = subject
-        end
-        if saved.cf then
-            cam.CFrame = saved.cf
+        -- Always hand the view back to Roblox's character camera controller.
+        -- Restoring a cached CFrame here can pin the camera at an old airborne
+        -- position while the character has already moved on. It also overwrites
+        -- the player's own camera movement made during the automated pickup.
+        local hum = camHumanoid()
+        cam.CameraType = Enum.CameraType.Custom
+        if hum then
+            cam.CameraSubject = hum
+        else
+            local subject = saved.subject
+            if subject and subject.Parent then
+                cam.CameraSubject = subject
+            end
         end
     end)
     A.touched = false
     A.orig = nil
+end
+
+-- Auto Mine and Auto Scrap can finish after an interrupted pickup/aim coroutine.
+-- Release all outstanding aim tokens and hand control back to Roblox without restoring
+-- a cached CFrame, which can leave the camera suspended at an old airborne position.
+function S.releaseAutofarmCamera()
+    local A = S._camAim
+    if A then
+        A.count = 0
+        A.orig = nil
+        A.touched = false
+        A.lastAt = 0
+    end
+    local cam = Workspace.CurrentCamera
+    if not cam then
+        return
+    end
+    pcall(function()
+        cam.CameraType = Enum.CameraType.Custom
+        local hum = camHumanoid()
+        if hum then
+            cam.CameraSubject = hum
+        end
+    end)
 end
 
 -- Safety net: if the camera was left Scriptable by an aim that never got restored, free it.
@@ -15562,6 +15588,10 @@ function S.autofarmUnderMinePass(opts)
     Autofarm._miningBusySince = nil
     Autofarm._oreHuntMode = false
 
+    -- Auto Mine may have run item-pickup camera aiming during the pass. Always
+    -- release any leftover Scriptable camera state before the avatar resumes travel.
+    pcall(S.releaseAutofarmCamera)
+
     return mined
 end
 
@@ -17053,16 +17083,15 @@ function S.autofarmDumpBagToDrill()
         return 0
     end
 
-    -- Auto Mine uses the same verified one-item-at-a-time drop flow as Auto
-    -- Scrap (snapshot bag -> Drop -> confirm world item -> place on target pad).
-    -- This avoids the older rapid bagDrop/re-weld loop missing items under lag.
+    -- Auto Mine now uses the exact same Hold-F whole-bag drop mechanic as Auto Scrap.
+    -- The character is positioned on the drill bed before F is held.
     local AO = S.AutoOres
     if AO and AO.owned and AO.dropWhenFull ~= false and bed and type(S.dumpBagOntoPart) == "function" then
         local startFill = S.getBagFillCount()
         if startFill <= 0 then return 0 end
         local dumped = 0
         local okDump, result = pcall(function()
-            return S.dumpBagOntoPart(bed, "Drill", nil, { force = false })
+            return S.dumpBagOntoPart(bed, "Drill", nil, { force = false, forceHoldF = true })
         end)
         if okDump then dumped = tonumber(result) or 0 end
         Money.trackedBagSize = S.getBagFillCount()
@@ -17074,9 +17103,9 @@ function S.autofarmDumpBagToDrill()
             S.lockAutofarmHover(true)
         end
         if Money.trackedBagSize > 0 then
-            S.notify("Auto Mine", "Dropped " .. tostring(dumped) .. " · bag still " .. tostring(Money.trackedBagSize), 4)
+            S.notify("Auto Mine", "Hold-F dropped " .. tostring(dumped) .. " · bag still " .. tostring(Money.trackedBagSize), 4)
         else
-            S.notify("Auto Mine", "Dropped inventory at drill", 3)
+            S.notify("Auto Mine", "Hold-F dropped inventory at drill", 3)
         end
         return dumped
     end
@@ -26410,6 +26439,7 @@ function S.setAutoMineOres(enabled)
         S.notify("Auto Mine Ores", "ON - " .. table.concat(AO.types, ", "), 4)
     else
         AO.owned = false
+        pcall(S.releaseAutofarmCamera)
         local saved = AO.saved
         AO.saved = nil
         task.spawn(function()
@@ -26921,7 +26951,7 @@ function S.buildCollectorSections(CollectorTab)
         end,
     })
     CollectorTab:CreateToggle({
-        Name = "Hold F to drop on Shredder",
+        Name = "Hold F to drop on Shredder / Drill",
         CurrentValue = S.HoldDrop.enabled == true,
         Flag = "miyugui_hold_drop",
         Callback = function(value)
@@ -26958,32 +26988,6 @@ function S.buildCollectorSections(CollectorTab)
             if Autofarm.scrapSweep == true then
                 Autofarm.scrapDetectRange = S.ScrapSweepRange
             end
-        end,
-    })
-    CollectorTab:CreateToggle({
-        Name = "Open chests before picking up scrap",
-        CurrentValue = S.ScrapChest.enabled == true,
-        Flag = "miyugui_scrap_chest",
-        Callback = function(value)
-            S.ScrapChest.enabled = value == true
-        end,
-    })
-    CollectorTab:CreateSlider({
-        Name = "Wait for chest to drop items (seconds)",
-        Range = { 1, 10 },
-        Increment = 0.5,
-        CurrentValue = S.ScrapChest.waitSeconds,
-        Flag = "miyugui_scrap_chest_wait",
-        Callback = function(value)
-            S.ScrapChest.waitSeconds = math.clamp(tonumber(value) or 4.5, 1, 10)
-        end,
-    })
-    CollectorTab:CreateToggle({
-        Name = "Shred right after each chest",
-        CurrentValue = S.ScrapChest.shredAfterChest == true,
-        Flag = "miyugui_scrap_chest_shred",
-        Callback = function(value)
-            S.ScrapChest.shredAfterChest = value == true
         end,
     })
 
@@ -30402,9 +30406,9 @@ S.ScrapPick = {
 -- Auto Scrap: tầm quét scrap (stud, tính phẳng như ESP).
 S.ScrapSweepRange = 5000
 
--- Auto Scrap: mở rương > chờ rương nhả đồ > nhặt scrap rơi ra > ra shredder nghiền.
+-- Auto Scrap: collect naturally spawned world scrap only; never open chests.
 S.ScrapChest = {
-    enabled = true,
+    enabled = false,
     waitSeconds = 4.5, -- wait after opening a chest (4-5s)
     dropRadius = 90, -- scrap within this radius of the chest counts as the chest's drops
     lootPasses = 4,
@@ -30489,7 +30493,7 @@ function S.dumpBagHoldF(part, label, opts)
 
     local after = before
     for round = 1, math.max(1, tonumber(S.HoldDrop.maxRounds) or 1) do
-        S.notify("Shredder", "Holding F " .. tostring(S.HoldDrop.seconds) .. "s (round " .. round .. ")", 3)
+        S.notify(tostring(label or "Drop"), "Holding F " .. tostring(S.HoldDrop.seconds) .. "s (round " .. round .. ")", 3)
         local completed = S.holdFKey(S.HoldDrop.seconds, tick)
         task.wait(0.6)
         pcall(function()
@@ -30506,7 +30510,7 @@ function S.dumpBagHoldF(part, label, opts)
 
     Money.trackedBagSize = S.getBagFillCount()
     local dumped = math.max(0, before - after)
-    S.notify("Shredder", "Dropped " .. tostring(dumped) .. " (bag left " .. tostring(after) .. ")", 3)
+    S.notify(tostring(label or "Drop"), "Dropped " .. tostring(dumped) .. " (bag left " .. tostring(after) .. ")", 3)
     return dumped
 end
 
@@ -30528,6 +30532,12 @@ function S.isScrapCategoryItem(item)
     local name = string.lower(tostring(item.Name or ""))
     local display = string.lower(tostring(item:GetAttribute("DisplayName") or ""))
     local rarity = item:GetAttribute("Rarity")
+    -- Never treat a chest/container as scrap; only collect spawned scrap loot objects.
+    if name:find("chest", 1, true) or display:find("chest", 1, true)
+        or name:find("crate", 1, true) or display:find("crate", 1, true)
+    then
+        return false
+    end
     local blob = S.itemCategoryKey(item) .. " " .. name .. " " .. display
     for _, attr in ipairs({ "DisplayCategory", "Category", "Class", "ItemType", "Type" }) do
         local raw = item:GetAttribute(attr)
@@ -30711,13 +30721,10 @@ S._ssOrigApplySettings = S.applyScrapSweepSettings
 function S.applyScrapSweepSettings(...)
     S._ssOrigApplySettings(...)
     Autofarm.scrapDetectRange = math.max(tonumber(Autofarm.scrapDetectRange) or 0, tonumber(S.ScrapSweepRange) or 5000)
-    -- Chỉ bật mở rương khi chạy Auto Scrap riêng (Mine Run có pha mở rương riêng của nó).
-    local SC = S.ScrapChest
-    if S.ScrapSweep and S.ScrapSweep.owned == true and SC and SC.enabled then
-        Autofarm.openChests = true
-        Autofarm.chestTypes = table.clone and table.clone(SC.types) or { table.unpack(SC.types) }
-        S.trySetRayfieldFlag("terra_af_auto_chests", true, true)
-    end
+    -- Auto Scrap is natural-world-scrap only: never visit or open chests.
+    Autofarm.openChests = false
+    if S.ScrapChest then S.ScrapChest.enabled = false end
+    S.trySetRayfieldFlag("terra_af_auto_chests", false, true)
 end
 
 -- (b) Nhặt bằng phím F: bay sát item > ngắm camera vào item > bấm F ngắn > kiểm tra item biến mất.
@@ -30729,49 +30736,11 @@ end
 
 function S.scrapPickItemF(item)
     local prevPin, prevY = Autofarm._mineHoldPos, Autofarm._gatePinY
-    local camera = Workspace.CurrentCamera
-    local cameraState
-    pcall(function()
-        if camera then
-            cameraState = {
-                subject = camera.CameraSubject,
-                cameraType = camera.CameraType,
-                cframe = camera.CFrame,
-                focus = camera.Focus,
-                fieldOfView = camera.FieldOfView,
-            }
-        end
-    end)
-
+    -- pickupInGame owns the temporary camera-aim lifecycle. Do not take a
+    -- second camera snapshot here: nested snapshots can restore a stale
+    -- Scriptable camera/CFrame after the inner pickup has already released it.
     local ok, res = xpcall(function() return S._ssPickInner(item) end, debug.traceback)
     Autofarm._mineHoldPos, Autofarm._gatePinY = prevPin, prevY
-
-    -- Always release a temporary/scriptable pickup camera, even when the pickup
-    -- exits early or errors. If its old subject vanished, bind it back to the
-    -- current character instead of leaving the view suspended in mid-air.
-    pcall(function()
-        local current = Workspace.CurrentCamera
-        if current then
-            local char = LocalPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local subject = cameraState and cameraState.subject
-            if not subject or subject == item or not subject.Parent then subject = hum end
-            local oldType = cameraState and cameraState.cameraType
-            if oldType == Enum.CameraType.Scriptable or not subject then
-                current.CameraType = Enum.CameraType.Custom
-            else
-                current.CameraType = oldType or Enum.CameraType.Custom
-            end
-            current.CameraSubject = subject or hum
-            if cameraState then
-                if cameraState.fieldOfView then current.FieldOfView = cameraState.fieldOfView end
-                if cameraState.focus then current.Focus = cameraState.focus end
-                if cameraState.cframe and current.CameraType == Enum.CameraType.Scriptable then
-                    current.CFrame = cameraState.cframe
-                end
-            end
-        end
-    end)
     if not ok then warn("[MiyuGUI][AutoScrap] pickup error:", res); return false end
     return res == true
 end
@@ -30874,18 +30843,11 @@ end
 
 S._ssOrigVisitChest = S.autofarmVisitChest
 function S.autofarmVisitChest(chest)
-    local SC = S.ScrapChest
-    local active = Autofarm.scrapSweep == true and S.ScrapSweep and S.ScrapSweep.owned == true and SC and SC.enabled
-    if not active then
-        return S._ssOrigVisitChest(chest)
+    if Autofarm.scrapSweep == true and S.ScrapSweep and S.ScrapSweep.owned == true then
+        -- Do not interact with chests while Auto Scrap is active.
+        return false
     end
-    local model = (S.resolveDungeonChestModel and S.resolveDungeonChestModel(chest)) or chest
-    local chestPos = S.getInstancePosition(model) or S.getItemPosition(model) -- read first, the chest can disappear after opening
-    local ok = S._ssOrigVisitChest(chest)
-    if ok then
-        pcall(S.scrapSweepAfterChest, chestPos)
-    end
-    return ok
+    return S._ssOrigVisitChest(chest)
 end
 
 -- ========== AUTO DRILL RUN (1 nút) ==========
