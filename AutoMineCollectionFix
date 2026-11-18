@@ -15563,8 +15563,10 @@ function S.autofarmUnderMinePass(opts)
                 local breakPos = rockPos or S.getOreWorldPosition(ore) or underHold
                 pcall(S.noteOreBroken, breakPos)
                 if S.isAutoMineOreAutoCollectEnabled() then
+                    -- Do not select/begin another ore until this ore's drops have
+                    -- had time to spawn and the collector has finished picking them up.
                     pcall(function()
-                        S.vacuumOreDropsVerified(breakPos)
+                        S.collectMinedDropsBeforeNextOre(breakPos)
                     end)
                 end
                 if S.isScrapGoldPhase() then
@@ -21478,6 +21480,49 @@ function S.vacuumOreDropsVerified(nearPos)
     return S.yankOreDropsNearby(math.max(range, 800))
 end
 
+-- Synchronous post-break collection for Auto Mine. Keep miningBusy set while
+-- this runs so the background collector cannot race this pickup pass. Poll for
+-- delayed loot spawns and only return after the nearby drop list stays empty.
+function S.collectMinedDropsBeforeNextOre(nearPos)
+    if not S.isAutoMineOreAutoCollectEnabled() or S.isBagFull() then
+        return 0
+    end
+
+    local total = 0
+    local range = math.max(S.getAutofarmLootRange(), 800)
+    pcall(function()
+        total += tonumber(S.vacuumOreDropsVerified(nearPos)) or 0
+    end)
+
+    local startedAt = os.clock()
+    local lastFoundAt = os.clock()
+    local sawDrops = total > 0
+
+    while Autofarm.enabled
+        and S.isAutoMineOreAutoCollectEnabled()
+        and not Autofarm._drillDumping
+        and not S.isBagFull()
+        and os.clock() - startedAt < 3.0
+    do
+        task.wait(0.18)
+
+        local pending = S.collectWorldOreDrops(range)
+        if #pending > 0 then
+            sawDrops = true
+            lastFoundAt = os.clock()
+            local got = S.yankOreDropsNearby(range)
+            total += tonumber(got) or 0
+        elseif sawDrops and os.clock() - lastFoundAt >= 0.55 then
+            break
+        elseif not sawDrops and os.clock() - startedAt >= 1.25 then
+            -- No drops appeared for this break; don't stall the mining loop.
+            break
+        end
+    end
+
+    return total
+end
+
 -- Selected ores near you / about to pass on Track. Cruise-stop range only (not full loot range).
 -- Cheap cached wrapper: the cruise stop-check hits this every frame, but the full
 -- Workspace ore walk is expensive — only rescan every ~0.12s to avoid FPS softlock.
@@ -21742,7 +21787,7 @@ function S.autofarmVisitOre(ore, knownPos)
             task.wait(0.08)
             if S.isAutoMineOreAutoCollectEnabled() then
                 pcall(function()
-                    S.vacuumOreDropsVerified(breakPos)
+                    S.collectMinedDropsBeforeNextOre(breakPos)
                 end)
             end
             if S.isScrapGoldPhase() then
@@ -26355,6 +26400,27 @@ function S.getAutoMineGemDropKey(item)
     return nil
 end
 
+function S.isAutoMineDropTypeSelected(dropType)
+    local wanted = S.mapOreTypeString(tostring(dropType or "")) or tostring(dropType or "")
+    wanted = string.lower(wanted)
+    local types = S.getAutofarmActiveOreTypes()
+    -- An empty dropdown means nothing is selected: never collect unselected loot.
+    if type(types) ~= "table" or #types == 0 then
+        return false
+    end
+    for _, selected in ipairs(types) do
+        if type(selected) == "table" then
+            selected = selected[1] or selected.Name or selected.CurrentOption
+        end
+        local mapped = S.mapOreTypeString(tostring(selected or ""))
+        local selectedKey = string.lower(tostring(mapped or selected or ""))
+        if selectedKey == wanted then
+            return true
+        end
+    end
+    return false
+end
+
 function S.isMinedGemDrop(item)
     if not item or not item.Parent then
         return false
@@ -26382,20 +26448,8 @@ function S.isMinedGemDrop(item)
         return false
     end
 
-    -- Only collect gems whose corresponding ore type is selected in Auto Mine.
-    local types = S.getAutofarmActiveOreTypes()
-    if type(types) ~= "table" or #types == 0 then
-        return true
-    end
-    local want = string.lower(key)
-    for _, selected in ipairs(types) do
-        local mapped = S.mapOreTypeString(tostring(selected or ""))
-        local selectedKey = string.lower(tostring(mapped or selected or ""))
-        if selectedKey == want or (want == "heartgem" and selectedKey == "heart") then
-            return true
-        end
-    end
-    return false
+    -- Only collect gems whose matching ore type is selected in Ores to Mine.
+    return S.isAutoMineDropTypeSelected(key)
 end
 
 function S.isMinedBarDrop(item)
@@ -26406,9 +26460,20 @@ function S.isMinedBarDrop(item)
     if not (AO and AO.owned and AO.autoCollect ~= false) or not item or not item.Parent then
         return false
     end
-    if not S.isSmeltedBarItem(item) and not S.isMinedGemDrop(item) then
+
+    if S.isSmeltedBarItem(item) then
+        -- Iron bars come from the Iron (internally Copper) ore option;
+        -- Gold bars come from the Gold ore option.
+        local joined = string.lower(tostring(item.Name or "") .. " " .. tostring(item:GetAttribute("DisplayName") or ""))
+        local sourceType = joined:find("iron", 1, true) and "Copper"
+            or (joined:find("gold", 1, true) and "Gold" or nil)
+        if not sourceType or not S.isAutoMineDropTypeSelected(sourceType) then
+            return false
+        end
+    elseif not S.isMinedGemDrop(item) then
         return false
     end
+
     return not S.isItemInTruckZone(item)
 end
 
