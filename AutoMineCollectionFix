@@ -26282,12 +26282,81 @@ end
 -- Gems dropped by Auto Mine (Diamond / Emerald / Ruby / HeartGem). These are raw drops, not bars,
 -- so the bar-only filter below used to skip them. Only gems whose ore type is selected are taken.
 S.AUTO_MINE_GEM_KEYS = { diamond = true, emerald = true, ruby = true, heartgem = true }
+
+-- Resolve gem drops from both the ore metadata and the actual world-drop name.
+-- The game uses several names (e.g. Diamond, DiamondOre, Gem_Diamond), so an
+-- exact-only getLootOreTypeKey() lookup missed some legitimate mined gems.
+function S.getAutoMineGemDropKey(item)
+    if not item then
+        return nil
+    end
+
+    local rarity = item:GetAttribute("Rarity")
+    local candidates = {}
+    local function addCandidate(value)
+        if typeof(value) == "string" and value ~= "" then
+            candidates[#candidates + 1] = value
+        end
+    end
+    addCandidate(item:GetAttribute("SessionOreType"))
+    addCandidate(item:GetAttribute("OreType"))
+    addCandidate(item:GetAttribute("DisplayName"))
+    addCandidate(item.Name)
+
+    local function parseCandidate(raw)
+        if typeof(raw) ~= "string" or raw == "" then
+            return nil
+        end
+        local value = S.stripRarityPrefix(raw, rarity)
+        local mapped = S.mapOreTypeString(value) or S.mapOreTypeString(raw)
+        if mapped then
+            local key = string.lower(tostring(mapped))
+            if key == "heart" or key == "heartgem" then
+                return "HeartGem"
+            end
+            if S.AUTO_MINE_GEM_KEYS[key] then
+                return mapped
+            end
+        end
+
+        -- Normalize common world-drop aliases without matching weapon names
+        -- such as Diamond Sword or Ruby Armor.
+        local compact = string.lower(tostring(value)):gsub("[^%a]", "")
+        compact = compact:gsub("^gem", ""):gsub("^ore", "")
+        compact = compact:gsub("gem$", ""):gsub("ore$", ""):gsub("drop$", "")
+        if compact == "diamond" then return "Diamond" end
+        if compact == "emerald" then return "Emerald" end
+        if compact == "ruby" then return "Ruby" end
+        if compact == "heart" or compact == "heartgem" then return "HeartGem" end
+        return nil
+    end
+
+    for _, raw in ipairs(candidates) do
+        local key = parseCandidate(raw)
+        if key then
+            return key
+        end
+    end
+
+    -- Some builds tag the collectible category but omit OreType. Use the
+    -- established ore-drop classifier as a final fallback, then revalidate
+    -- that its resolved key is one of the four requested gems.
+    local ok, selectedOreDrop = pcall(S.isSelectedOreDropItem, item)
+    if ok and selectedOreDrop then
+        local okKey, key = pcall(S.getLootOreTypeKey, item)
+        if okKey and type(key) == "string" then
+            local normalized = string.lower(key)
+            if normalized == "heart" then return "HeartGem" end
+            if S.AUTO_MINE_GEM_KEYS[normalized] then
+                return key
+            end
+        end
+    end
+    return nil
+end
+
 function S.isMinedGemDrop(item)
     if not item or not item.Parent then
-        return false
-    end
-    local ok, key = pcall(S.getLootOreTypeKey, item)
-    if not ok or type(key) ~= "string" or not S.AUTO_MINE_GEM_KEYS[string.lower(key)] then
         return false
     end
     if S.isSmeltedBarStrict(item) or S.isWorldToolItem(item) or S.isHardExcluded(item) then
@@ -26297,19 +26366,32 @@ function S.isMinedGemDrop(item)
     if okJunk and junk then
         return false
     end
-    if S.itemCategoryKey(item) == "scrap" then
+
+    local category = string.lower(tostring(S.itemCategoryKey(item) or ""))
+    if category == "scrap" or category == "bar" then
         return false
     end
-    -- Respect the ore types picked for Auto Mine.
+    -- If the game explicitly classifies it as equipment/weapon/etc., do not
+    -- mistake a name containing a gem word for a mined gem.
+    if category ~= "" and category ~= "ore" and category ~= "gem" and category ~= "collectible" and category ~= "crystal" and category ~= "mineral" then
+        return false
+    end
+
+    local key = S.getAutoMineGemDropKey(item)
+    if not key then
+        return false
+    end
+
+    -- Only collect gems whose corresponding ore type is selected in Auto Mine.
     local types = S.getAutofarmActiveOreTypes()
     if type(types) ~= "table" or #types == 0 then
         return true
     end
     local want = string.lower(key)
     for _, selected in ipairs(types) do
-        local sel = string.lower(tostring(selected or ""))
         local mapped = S.mapOreTypeString(tostring(selected or ""))
-        if sel == want or (mapped and string.lower(mapped) == want) then
+        local selectedKey = string.lower(tostring(mapped or selected or ""))
+        if selectedKey == want or (want == "heartgem" and selectedKey == "heart") then
             return true
         end
     end
@@ -26318,7 +26400,7 @@ end
 
 function S.isMinedBarDrop(item)
     local AO = S.AutoOres
-    -- While Auto Mine is running, accept any nearby real Iron/Gold bar, plus selected gems.
+    -- While Auto Mine is running, accept real Iron/Gold bars plus selected mined gems.
     -- Do not require a recent ore-break position: that incorrectly restricted
     -- collection to bars spawned inside the mineshaft / beside the last ore.
     if not (AO and AO.owned and AO.autoCollect ~= false) or not item or not item.Parent then
@@ -26381,7 +26463,7 @@ S.AutoOres = S.AutoOres or {
     saved = nil,
     breakWorms = true,
     useBest = true,
-    autoCollect = true, -- collect newly spawned Iron/Gold bars only
+    autoCollect = true, -- collect Iron/Gold bars and selected Diamond/Emerald/Ruby/HeartGem drops
     _lastSwap = 0,
     types = { "Coal", "Copper", "Gold", "Diamond", "Ruby", "Emerald", "HeartGem" },
     barWindow = 8,
@@ -27270,7 +27352,7 @@ function S.buildCollectorSections(CollectorTab)
         end,
     })
     CollectorTab:CreateToggle({
-        Name = "Auto Collect Iron/Gold Bars Only",
+        Name = "Auto Collect Mined Bars + Gems",
         CurrentValue = S.AutoOres.autoCollect ~= false,
         Flag = "miyugui_auto_mine_auto_collect",
         Callback = function(value)
@@ -27355,7 +27437,7 @@ function S.buildCollectorSections(CollectorTab)
     })
     CollectorTab:CreateParagraph({
         Title = "Auto Mine Ores",
-        Content = "Flies the map, stands under the chosen ores and mines them with your pickaxe. Use Auto Collect Iron/Gold Bars Only to toggle pickup after each break. Turn Auto Scrap and Run off first - only one collector can drive the farm engine at a time.",
+        Content = "Flies the map, stands under the chosen ores and mines them with your pickaxe. Use Auto Collect Mined Bars + Gems to pick up Iron/Gold bars and selected gems after mining. Turn Auto Scrap and Run off first - only one collector can drive the farm engine at a time.",
     })
 
     CollectorTab:CreateSection("Auto Collect Sacks")
