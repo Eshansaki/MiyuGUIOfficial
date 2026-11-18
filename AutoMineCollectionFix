@@ -11263,7 +11263,7 @@ function S.collectWorldOreDrops(range)
     range = tonumber(range) or 800
     local list = {}
     S.forEachWorldLootItem(function(item)
-        if S.isSelectedOreDropItem(item) or S.isMinedBarDrop(item) then
+        if S.isMinedBarDrop(item) then
             local pos = S.getItemPosition(item)
             if pos then
                 local dist = S.getFlatDistanceFromPosition(pos)
@@ -26170,27 +26170,9 @@ S.AO_BARS = S.AO_BARS or {
 }
 
 function S.isSmeltedBarItem(item)
-    if not item or not item.Parent then return false end
-    local names = { tostring(item.Name or ""), tostring(item:GetAttribute("DisplayName") or "") }
-    local joined = string.lower(table.concat(names, " ")):gsub("[^%a]", "")
-    local hasIron = joined:find("iron", 1, true) ~= nil
-    local hasGold = joined:find("gold", 1, true) ~= nil
-    if not (hasIron or hasGold) then return false end
-    -- Smelted drops may be named simply Iron/Gold, or IronOre/GoldOre/IronBar/GoldBar.
-    -- Exclude unrelated objects whose display names merely contain the metal word.
-    local hasOreOrBar = joined == "iron" or joined == "gold"
-        or joined:find("ore", 1, true) ~= nil or joined:find("bar", 1, true) ~= nil
-    if not hasOreOrBar then
-        for _, attr in ipairs({ "Class", "ItemType", "Type", "Category", "DisplayCategory" }) do
-            local v = string.lower(tostring(item:GetAttribute(attr) or ""))
-            if v:find("ore", 1, true) or v:find("bar", 1, true) or v:find("smelt", 1, true) then
-                hasOreOrBar = true; break
-            end
-        end
-    end
-    return hasOreOrBar and not joined:find("barrel", 1, true)
+    -- Auto Mine may collect only actual Iron / Gold bars, never raw ore drops.
+    return S.isSmeltedBarStrict(item)
 end
-
 -- Strict test used by the loot filters: a real Iron / Gold BAR (never a raw ore, never gear).
 function S.isSmeltedBarStrict(item)
     if not item or not item.Parent then
@@ -26201,7 +26183,7 @@ function S.isSmeltedBarStrict(item)
     if joined:find("barrel", 1, true) or joined:find("barricade", 1, true) then
         return false
     end
-    if not (joined:find("iron", 1, true) or joined:find("copper", 1, true) or joined:find("gold", 1, true)) then
+    if not (joined:find("iron", 1, true) or joined:find("gold", 1, true)) then
         return false
     end
     if S.isWorldToolItem(item) then
@@ -26278,7 +26260,7 @@ S.AutoOres = S.AutoOres or {
     saved = nil,
     breakWorms = true,
     useBest = true,
-    autoCollect = true, -- collect ore/gem drops after each mined ore
+    autoCollect = true, -- collect newly spawned Iron/Gold bars only
     _lastSwap = 0,
     types = { "Coal", "Copper", "Gold", "Diamond", "Ruby", "Emerald", "HeartGem" },
     barWindow = 8,
@@ -26846,7 +26828,7 @@ function S.auraCollectPass()
             ok = good and res == true and not (Loot.skipTruckLoot and S.isItemInTruckZone(item))
         end
         if not ok and S.AutoOres and S.AutoOres.owned then
-            ok = (S.isSelectedOreDropItem(item) or S.isMinedBarDrop(item))
+            ok = S.isMinedBarDrop(item)
                 and not (Loot.skipTruckLoot and S.isItemInTruckZone(item))
         end
         if ok then
@@ -27167,7 +27149,7 @@ function S.buildCollectorSections(CollectorTab)
         end,
     })
     CollectorTab:CreateToggle({
-        Name = "Auto Collect Mined Ores/Gems + Iron/Gold Bars",
+        Name = "Auto Collect Iron/Gold Bars Only",
         CurrentValue = S.AutoOres.autoCollect ~= false,
         Flag = "miyugui_auto_mine_auto_collect",
         Callback = function(value)
@@ -27252,7 +27234,7 @@ function S.buildCollectorSections(CollectorTab)
     })
     CollectorTab:CreateParagraph({
         Title = "Auto Mine Ores",
-        Content = "Flies the map, stands under the chosen ores and mines them with your pickaxe. Use Auto Collect Mined Ores/Gems + Iron/Gold Bars to toggle pickup after each break. Turn Auto Scrap and Run off first - only one collector can drive the farm engine at a time.",
+        Content = "Flies the map, stands under the chosen ores and mines them with your pickaxe. Use Auto Collect Iron/Gold Bars Only to toggle pickup after each break. Turn Auto Scrap and Run off first - only one collector can drive the farm engine at a time.",
     })
 
     CollectorTab:CreateSection("Auto Collect Sacks")
@@ -32537,7 +32519,7 @@ function S.auraMinePass()
         if not item or not item.Parent or CollectionService:HasTag(item, "ShopItem") then
             return
         end
-        if not (S.isSelectedOreDropItem(item) or S.isMinedBarDrop(item)) then
+        if not S.isMinedBarDrop(item) then
             return
         end
         local pos = S.getItemPosition(item)
