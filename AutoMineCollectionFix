@@ -17091,211 +17091,154 @@ function S.autofarmDumpBagToDrill()
     end
 
     local bed = S.getDrillBedWeldPart()
-    local drill = S.getDrill()
-    if not bed and not drill then
-        S.notify("Autofarm", "Drill bed not found", 3)
+    if not bed or not bed:IsA("BasePart") then
+        S.notify("Autofarm", "Drill truck bed not found — keeping loot", 3)
         return 0
     end
 
+    -- Save the exact route position before leaving the pocket. The old custom
+    -- standAtTrailer() only checked a loose radius and could issue Drop while
+    -- the character was still at the mining location.
     local root = S.getRoot()
-    S.cancelAutofarmTween()
     Autofarm.resumePocketDistance = Autofarm.distance or S.syncAutofarmDistanceFromRoot()
     Autofarm.resumePocketPos = root and root.Position or nil
-
-    local function standAtTrailer()
-        root = S.getRoot()
-        if not root then
-            return
-        end
-        local stand = S.getDrillTrailerStandPosition()
-            or (bed and (bed.Position + S.getDrillTrailerBackDirection(bed, drill) * 12 + Vector3.new(0, 4, 0)))
-            or (drill and (drill:GetPivot().Position + Vector3.new(0, 5, 0)))
-        if not stand then
-            return
-        end
-        Autofarm._gatePinY = stand.Y
-        root.Anchored = false
-        root.CFrame = CFrame.new(stand)
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-        S.setAutofarmPlatformStand(true)
-        if not Autofarm._farmShuttingDown then
-        S.ensureAutofarmAntiFall(true)
-        S.lockAutofarmHover(true)
-        end
-        S.requestStreamAround(stand, 0.8)
-    end
-
-    local function atTrailer()
-        local rootNow = S.getRoot()
-        local stand = S.getDrillTrailerStandPosition()
-        if not rootNow or not stand then
-            return false
-        end
-        local flat = (Vector3.new(rootNow.Position.X, 0, rootNow.Position.Z) - Vector3.new(stand.X, 0, stand.Z)).Magnitude
-        return flat <= 16 and math.abs(rootNow.Position.Y - stand.Y) <= 18
-    end
-
-    local function dropOnlyAtTrailer()
-        if not atTrailer() then
-            standAtTrailer()
-            task.wait(0.08)
-        end
-        if not atTrailer() then
-            return false
-        end
-        S.bagDrop()
-        return true
-    end
-
-    standAtTrailer()
+    S.cancelAutofarmTween()
     S.clearDragTarget()
-    S.ensureItemBag()
+    S.ensureItemBag(true)
+
     pcall(function()
         local update = Services.ToolService.Update
         if update and update.Fire then
             update:Fire({ "GetStoredItems" })
         end
     end)
-    task.wait(0.05)
+    task.wait(0.1)
 
-    local dumped = 0
-    local parkIndex = 0
-    local stalls = 0
+    local dropCf = S.getDumpPadDropCFrame(bed)
+    if not dropCf then
+        S.notify("Autofarm", "Invalid drill bed drop position — keeping loot", 3)
+        return 0
+    end
 
-    -- Hold F on the trailer = the game drops the WHOLE inventory at once (no one-by-one loop).
-    -- Drill dumps must use the verified one-item path below. The bulk Hold-F
-    -- path can spawn the whole sack at the character's feet without bed placement.
-    local usedHold = false
-    if false and S.HoldDrop and S.HoldDrop.enabled and S.getBagFillCount() > 0 then
-        usedHold = true
-        local beforeAll = S.getBagFillCount()
-        local function holdTick()
-            if not Autofarm.enabled or Autofarm._farmShuttingDown then
+    -- Use the same strict pad-arrival verifier used by the sell/shredder
+    -- dump routines. Do not call Drop until the character is confirmed above
+    -- the actual bed, and re-check before every item.
+    local function reachBed()
+        if not bed.Parent then
+            return false
+        end
+        if not S.isCharacterAtDumpPad(bed, 10) then
+            if not S.arriveAtDumpPad(bed, "Drill", { timeout = 8 }) then
                 return false
             end
-            if not atTrailer() then
-                standAtTrailer()
-            end
-            return true
         end
-        for round = 1, math.max(1, tonumber(S.HoldDrop.maxRounds) or 1) do
-            S.ensureItemBag(true)
-            S.notify("Drill", "Holding F " .. tostring(S.HoldDrop.seconds) .. "s (round " .. round .. ")", 3)
-            local completed = S.holdFKey(S.HoldDrop.seconds, holdTick)
-            task.wait(0.6)
-            pcall(function()
-                local update = Services.ToolService.Update
-                if update and update.Fire then
-                    update:Fire({ "GetStoredItems" })
-                end
-            end)
-            if S.getBagFillCount() <= 0 or not completed then
-                break
-            end
-        end
-        dumped = math.max(0, beforeAll - S.getBagFillCount())
+        return S.isCharacterAtDumpPad(bed, 10)
     end
 
-    for _ = 1, 220 do
-        if usedHold or not Autofarm.enabled or not S.isDropInDrillMode() then
-            break
-        end
-        local before = S.getBagFillCount()
-        if before <= 0 then
-            break
-        end
+    local dumped = 0
+    local stalls = 0
+    local parkIndex = 0
 
-        standAtTrailer()
-        S.ensureItemBag(true)
-        local beforeSet = S.snapshotItemsSet()
-        if not dropOnlyAtTrailer() then
-            S.notify("Autofarm", "Drop in Drill — still on the map, not dropping", 3)
-            break
-        end
-
-        local item = nil
-        local confirmed = false
-        for _ = 1, 12 do
-            task.wait()
-            local news = S.findNewWorldItems(beforeSet)
-            if news[1] then
-                item = news[1]
-                confirmed = true
+    if not reachBed() then
+        S.notify("Autofarm", "Drill bed not reached — loot kept in bag", 4)
+    else
+        for _ = 1, 220 do
+            if not Autofarm.enabled or not S.isDropInDrillMode() or Autofarm._farmShuttingDown then
                 break
             end
-            if S.getBagFillCount() < before then
-                confirmed = true
-                break
-            end
-            if not dropOnlyAtTrailer() then
-                break
-            end
-        end
 
-        if item and item.Parent then
-            if S.sendItemToDrillBed(item, parkIndex) then
-                dumped += 1
-                parkIndex += 1
-                stalls = 0
-            else
+            local before = S.getBagFillCount()
+            if before <= 0 then
+                break
+            end
+
+            -- The game drops at the character's feet. Re-verify the character
+            -- is physically over the bed immediately before every Drop call.
+            if not reachBed() then
+                S.notify("Autofarm", "Lost drill-bed position — stopping dump safely", 3)
+                break
+            end
+
+            local beforeSet = S.snapshotItemsSet()
+            if not S.bagDrop() then
                 stalls += 1
-            end
-        elseif confirmed then
-            stalls = 0
-            dumped += math.max(0, before - S.getBagFillCount())
-        else
-            pcall(function()
-                local update = Services.ToolService.Update
-                if update and update.Fire then
-                    update:Fire({ "GetStoredItems" })
+            else
+                local news = {}
+                for _ = 1, 16 do
+                    task.wait(0.05)
+                    news = S.findNewWorldItems(beforeSet)
+                    if #news > 0 or S.getBagFillCount() < before then
+                        break
+                    end
                 end
-            end)
-            stalls += 1
-            if stalls >= 10 then
+
+                if #news > 0 then
+                    local item = news[1]
+                    if item and item.Parent then
+                        -- Place the spawned item on the bed surface itself,
+                        -- not at a calculated rear/side offset.
+                        local bedNow = S.getDrillBedWeldPart()
+                        local target = bedNow and S.getDumpPadDropCFrame(bedNow) or dropCf
+                        if target then
+                            S.moveItemToCFrame(item, target * CFrame.new(0, 0.35 + (parkIndex % 8) * 0.18, 0))
+                            task.wait(0.08)
+                            local pos = S.getItemPosition(item)
+                            if pos and (pos - target.Position).Magnitude > 12 then
+                                S.moveItemToCFrame(item, target * CFrame.new(0, 0.35, 0))
+                                task.wait(0.08)
+                            end
+                            pcall(S.weldItem, item)
+                        end
+                        dumped += 1
+                        parkIndex += 1
+                        stalls = 0
+                    else
+                        stalls += 1
+                    end
+                elseif S.getBagFillCount() < before then
+                    dumped += math.max(0, before - S.getBagFillCount())
+                    stalls = 0
+                else
+                    pcall(function()
+                        local update = Services.ToolService.Update
+                        if update and update.Fire then
+                            update:Fire({ "GetStoredItems" })
+                        end
+                    end)
+                    stalls += 1
+                end
+            end
+
+            if stalls >= 8 then
+                S.notify("Autofarm", "Drill dump stalled — remaining loot kept in bag", 4)
                 break
             end
         end
     end
 
-    -- Final pass: empty anything still counted in the sack UI.
-    for _ = 1, 16 do
-        if usedHold or S.getBagFillCount() <= 0 then
-            break
-        end
-        standAtTrailer()
-        S.ensureItemBag(true)
-        local beforeSet = S.snapshotItemsSet()
-        local before = S.getBagFillCount()
-        if not dropOnlyAtTrailer() then
-            break
-        end
-        task.wait(0.05)
-        local news = S.findNewWorldItems(beforeSet)
-        if news[1] and news[1].Parent then
-            if S.sendItemToDrillBed(news[1], parkIndex) then
-                dumped += 1
-                parkIndex += 1
-            end
-        elseif S.getBagFillCount() >= before then
-            break
-        end
-    end
-
+    -- Always restore the autofarm pocket, including when the bed cannot be
+    -- reached or the Drop action fails. Never leave the character at the loot.
     pcall(S.autoLockTruckCycle)
-
     Autofarm._gatePinY = nil
+    Autofarm._mineHoldPos = nil
     Money.trackedBagSize = S.getBagFillCount()
     Autofarm.distance = Autofarm.resumePocketDistance or Autofarm.distance or 0
+
     if Autofarm.enabled and not Autofarm._farmShuttingDown then
-        S.returnToAutofarmPocket()
-        S.ensureAutofarmAntiFall(true)
-        S.lockAutofarmHover(true)
+        local returned = pcall(S.returnToAutofarmPocket)
+        if not returned then
+            pcall(function()
+                S.setAutofarmPose(Autofarm.distance)
+                S.setAutofarmPlatformStand(true)
+                S.ensureAutofarmAntiFall(true)
+                S.lockAutofarmHover(true)
+            end)
+        end
     end
 
     local left = S.getBagFillCount()
     if left > 0 then
-        S.notify("Autofarm", "Dropped " .. tostring(dumped) .. " — bag still " .. tostring(left), 4)
+        S.notify("Autofarm", "Dropped " .. tostring(dumped) .. " — " .. tostring(left) .. " kept in bag", 4)
     else
         S.notify("Autofarm", "Dropped full sack (" .. tostring(dumped) .. ") · resumed", 3)
     end
