@@ -8337,45 +8337,51 @@ function S.getDrillBedParkCFrame(index)
         return nil
     end
 
-    index = tonumber(index) or 0
-    local col = index % 4
-    local row = math.floor(index / 4)
-    local ox = (col - 1.5) * 1.4
-    local rowBack = (row % 4) * 1.15
-    local backDir = S.getDrillTrailerBackDirection(bed, drill)
-    local right = Vector3.new(-backDir.Z, 0, backDir.X)
-
+    index = math.max(0, tonumber(index) or 0)
     if bed then
-        -- Park on the REAR half of the bed (carreta), clear of the firebox.
-        local halfDepth = math.max(bed.Size.X, bed.Size.Z) * 0.5
-        local rearBias = math.max(10, halfDepth * 0.75)
+        -- Keep every item INSIDE the actual truck-bed footprint.
+        -- The previous 10+ stud rear offset placed items behind the trailer.
+        local backDir = S.getDrillTrailerBackDirection(bed, drill)
+        local right = Vector3.new(-backDir.Z, 0, backDir.X)
+        local bedRight = Vector3.new(bed.CFrame.RightVector.X, 0, bed.CFrame.RightVector.Z)
+        local bedLook = Vector3.new(bed.CFrame.LookVector.X, 0, bed.CFrame.LookVector.Z)
+        if bedRight.Magnitude < 0.05 then bedRight = Vector3.new(1, 0, 0) else bedRight = bedRight.Unit end
+        if bedLook.Magnitude < 0.05 then bedLook = Vector3.new(0, 0, -1) else bedLook = bedLook.Unit end
+
+        local halfDepth = math.abs(backDir:Dot(bedRight)) * bed.Size.X * 0.5
+            + math.abs(backDir:Dot(bedLook)) * bed.Size.Z * 0.5
+        local halfWidth = math.abs(right:Dot(bedRight)) * bed.Size.X * 0.5
+            + math.abs(right:Dot(bedLook)) * bed.Size.Z * 0.5
+
+        local rows = 4
+        local row = index % rows
+        local col = math.floor(index / rows) % 4
+        local depthStep = math.max(0.25, math.min(0.8, (halfDepth * 1.4) / rows))
+        local widthStep = math.max(0.25, math.min(0.8, (halfWidth * 1.4) / 4))
+        local rearOffset = (row - 1.5) * depthStep
+        local sideOffset = (col - 1.5) * widthStep
         local up = bed.Size.Y * 0.5 + 1.25
-        local pos = bed.Position
-            + backDir * (rearBias + rowBack)
-            + right * ox
-            + Vector3.new(0, up, 0)
+        local pos = bed.Position + backDir * rearOffset + right * sideOffset + Vector3.new(0, up, 0)
         return CFrame.lookAt(pos, pos + backDir)
     end
 
+    local backDir = S.getDrillTrailerBackDirection(nil, drill)
     local pivot = drill:GetPivot().Position
-    local pos = pivot + backDir * (14 + rowBack) + right * ox + Vector3.new(0, 3.5, 0)
+    local pos = pivot + backDir * 5 + Vector3.new(0, 3.5, 0)
     return CFrame.lookAt(pos, pos + backDir)
 end
 
--- Stand on trailer rear so bag drops land on the carreta, not the furnace.
+-- Stand above the middle of the truck bed so the game's Drop action
+-- creates the world item over the trailer, not beside or behind it.
 function S.getDrillTrailerStandPosition()
     local bed = S.getDrillBedWeldPart()
     local drill = S.getDrill()
-    local park = S.getDrillBedParkCFrame(0)
-    local backDir = S.getDrillTrailerBackDirection(bed, drill)
-    if park then
-        return park.Position + Vector3.new(0, 2.4, 0) + backDir * 2
-    end
     if bed then
-        return bed.Position + backDir * 12 + Vector3.new(0, 4, 0)
+        return bed.Position + Vector3.new(0, bed.Size.Y * 0.5 + 4, 0)
     end
     if drill then
-        return drill:GetPivot().Position + backDir * 16 + Vector3.new(0, 5, 0)
+        local backDir = S.getDrillTrailerBackDirection(nil, drill)
+        return drill:GetPivot().Position + backDir * 5 + Vector3.new(0, 5, 0)
     end
     return nil
 end
@@ -17158,8 +17164,10 @@ function S.autofarmDumpBagToDrill()
     local stalls = 0
 
     -- Hold F on the trailer = the game drops the WHOLE inventory at once (no one-by-one loop).
+    -- Drill dumps must use the verified one-item path below. The bulk Hold-F
+    -- path can spawn the whole sack at the character's feet without bed placement.
     local usedHold = false
-    if S.HoldDrop and S.HoldDrop.enabled and S.getBagFillCount() > 0 then
+    if false and S.HoldDrop and S.HoldDrop.enabled and S.getBagFillCount() > 0 then
         usedHold = true
         local beforeAll = S.getBagFillCount()
         local function holdTick()
