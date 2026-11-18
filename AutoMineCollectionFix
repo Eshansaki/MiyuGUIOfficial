@@ -17113,6 +17113,10 @@ function S._autofarmDumpBagToDrillCore()
         if not stand then
             return
         end
+        -- Auto Mine leaves _mineHoldPos set; the hover / anti-fall loops would drag X/Z back
+        -- to the mine every frame and keep us floating off the trailer. Release it first.
+        S.clearMineHoldPin()
+        Autofarm.moving = false
         Autofarm._gatePinY = stand.Y
         root.Anchored = false
         root.CFrame = CFrame.new(stand)
@@ -17140,9 +17144,12 @@ function S._autofarmDumpBagToDrillCore()
     local dumpStartSet = S.snapshotItemsSet()
 
     local function dropOnlyAtTrailer()
-        if not atTrailer() then
+        for attempt = 1, 4 do
+            if atTrailer() then
+                break
+            end
             standAtTrailer()
-            task.wait(0.08)
+            task.wait(0.08 * attempt)
         end
         if not atTrailer() then
             return false
@@ -17301,7 +17308,8 @@ function S._autofarmDumpBagToDrillCore()
     -- (player drifted off the trailer, stack spawned beside it, ...) goes back onto the bed.
     task.wait(0.1)
     for _, it in ipairs(S.findNewWorldItems(dumpStartSet)) do
-        if it and it.Parent and not CollectionService:HasTag(it, "ShopItem") and not S.isItemInTruckZone(it) then
+        if it and it.Parent and not CollectionService:HasTag(it, "ShopItem") and not S.isItemInTruckZone(it)
+            and not (S.isItemWelded and S.isItemWelded(it)) then
             local pos = S.getItemPosition(it)
             local near = false
             if pos then
@@ -26271,15 +26279,52 @@ function S.noteOreBroken(breakPos)
     end
 end
 
+-- Gems dropped by Auto Mine (Diamond / Emerald / Ruby / HeartGem). These are raw drops, not bars,
+-- so the bar-only filter below used to skip them. Only gems whose ore type is selected are taken.
+S.AUTO_MINE_GEM_KEYS = { diamond = true, emerald = true, ruby = true, heartgem = true }
+function S.isMinedGemDrop(item)
+    if not item or not item.Parent then
+        return false
+    end
+    local ok, key = pcall(S.getLootOreTypeKey, item)
+    if not ok or type(key) ~= "string" or not S.AUTO_MINE_GEM_KEYS[string.lower(key)] then
+        return false
+    end
+    if S.isSmeltedBarStrict(item) or S.isWorldToolItem(item) or S.isHardExcluded(item) then
+        return false
+    end
+    local okJunk, junk = pcall(S.isScrapJunkItem, item)
+    if okJunk and junk then
+        return false
+    end
+    if S.itemCategoryKey(item) == "scrap" then
+        return false
+    end
+    -- Respect the ore types picked for Auto Mine.
+    local types = S.getAutofarmActiveOreTypes()
+    if type(types) ~= "table" or #types == 0 then
+        return true
+    end
+    local want = string.lower(key)
+    for _, selected in ipairs(types) do
+        local sel = string.lower(tostring(selected or ""))
+        local mapped = S.mapOreTypeString(tostring(selected or ""))
+        if sel == want or (mapped and string.lower(mapped) == want) then
+            return true
+        end
+    end
+    return false
+end
+
 function S.isMinedBarDrop(item)
     local AO = S.AutoOres
-    -- While Auto Mine is running, accept any nearby real Iron/Gold bar.
+    -- While Auto Mine is running, accept any nearby real Iron/Gold bar, plus selected gems.
     -- Do not require a recent ore-break position: that incorrectly restricted
     -- collection to bars spawned inside the mineshaft / beside the last ore.
     if not (AO and AO.owned and AO.autoCollect ~= false) or not item or not item.Parent then
         return false
     end
-    if not S.isSmeltedBarItem(item) then
+    if not S.isSmeltedBarItem(item) and not S.isMinedGemDrop(item) then
         return false
     end
     return not S.isItemInTruckZone(item)
