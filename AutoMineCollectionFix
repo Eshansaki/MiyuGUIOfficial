@@ -26211,17 +26211,21 @@ function S.noteOreBroken(breakPos)
 end
 
 function S.isMinedBarDrop(item)
-    local AO, B = S.AutoOres, S.AO_BARS
+    local AO = S.AutoOres
+    -- While Auto Mine is running, accept any nearby real Iron/Gold bar.
+    -- Do not require a recent ore-break position: that incorrectly restricted
+    -- collection to bars spawned inside the mineshaft / beside the last ore.
     if not (AO and AO.owned and AO.autoCollect ~= false) or not item or not item.Parent then
         return false
     end
-    if B.mined[item] ~= true or not S.isSmeltedBarItem(item) then
+    if not S.isSmeltedBarItem(item) then
         return false
     end
     return not S.isItemInTruckZone(item)
 end
 
 task.spawn(function()
+    local nextPickupAt = 0
     while not S._unloading do
         task.wait(0.25)
         local AO, B = S.AutoOres, S.AO_BARS
@@ -26234,12 +26238,7 @@ task.spawn(function()
                         B.seen[item] = true
                         local pos = S.getItemPosition(item)
                         if pos then
-                            if B.breakPos and now - B.breakAt <= (AO.barWindow or 8)
-                                and (pos - B.breakPos).Magnitude <= (AO.barRadius or 40) then
-                                B.mined[item] = true
-                            else
-                                B.recent[#B.recent + 1] = { item = item, t = now, pos = pos }
-                            end
+                            B.mined[item] = true
                         end
                     end
                 end
@@ -26247,6 +26246,22 @@ task.spawn(function()
                     if now - B.recent[i].t > 4 or not B.recent[i].item.Parent then
                         table.remove(B.recent, i)
                     end
+                end
+
+                -- Keep collecting during the whole Auto Mine session, not just
+                -- immediately after a mined ore breaks. Pause during a mining
+                -- swing so pickup does not disturb the mining position.
+                if Autofarm and Autofarm.enabled and not Autofarm.miningBusy
+                    and now >= nextPickupAt and not S.isBagFull() then
+                    nextPickupAt = now + 0.9
+                    task.spawn(function()
+                        if AO.owned and AO.autoCollect ~= false
+                            and Autofarm.enabled and not Autofarm.miningBusy then
+                            pcall(function()
+                                S.yankOreDropsNearby(math.max(S.getAutofarmLootRange(), 800))
+                            end)
+                        end
+                    end)
                 end
             end
         end
