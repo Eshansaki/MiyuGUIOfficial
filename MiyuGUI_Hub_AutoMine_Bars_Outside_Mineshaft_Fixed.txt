@@ -12270,11 +12270,8 @@ function S.restoreCameraAim(saved)
         if subject then
             cam.CameraSubject = subject
         end
-        -- Put the camera back behind the character (the saved CFrame is stale after teleports).
-        local root = S.getRoot()
-        if root then
-            cam.CFrame = CFrame.lookAt(root.Position + Vector3.new(0, 6, 12), root.Position + Vector3.new(0, 2, 0))
-        end
+        -- Let Roblox's Custom camera controller choose the view. Writing CFrame
+        -- here causes extra camera churn during fast teleports.
     end)
     A.touched = false
     A.orig = nil
@@ -12300,10 +12297,8 @@ function S.fixCamera()
             LocalPlayer.CameraMaxZoomDistance = math.max(128, LocalPlayer.CameraMaxZoomDistance)
             LocalPlayer.CameraMinZoomDistance = math.min(0.5, LocalPlayer.CameraMinZoomDistance)
         end
-        local root = S.getRoot()
-        if root then
-            cam.CFrame = CFrame.lookAt(root.Position + Vector3.new(0, 6, 12), root.Position + Vector3.new(0, 2, 0))
-        end
+        -- Do not write Camera.CFrame; the default controller will smoothly
+        -- reacquire the current Humanoid without a forced camera snap.
     end)
 end
 
@@ -12330,6 +12325,12 @@ end)
 -- Only intervene when the camera is genuinely detached; do not fight normal
 -- player camera movement or a currently-running prompt camera aim.
 function S.recoverFarmCamera()
+    local now = os.clock()
+    if now - (S._lastFarmCameraCheck or 0) < 1.0 then
+        return false
+    end
+    S._lastFarmCameraCheck = now
+
     local scrapActive = (Autofarm and Autofarm.scrapSweep == true)
         or (S.ScrapSweep and S.ScrapSweep.owned == true)
     local mineActive = (S.AutoOres and S.AutoOres.owned == true)
@@ -12352,9 +12353,10 @@ function S.recoverFarmCamera()
         return false
     end
 
-    -- A prompt aim that stopped updating is stale; clear its bookkeeping.
+    -- Do not interrupt active camera aims. A stale Scriptable camera is handled
+    -- by the low-frequency safety net below, rather than resetting state here.
     if A and ((A.count or 0) > 0 or A.touched) then
-        A.count, A.orig, A.touched = 0, nil, false
+        return false
     end
 
     -- Do not teleport the camera CFrame to a computed world position here.
@@ -12387,7 +12389,7 @@ end
 -- after teleports, pickup interactions, drill drops, and mine transitions.
 task.spawn(function()
     while not S._unloading do
-        task.wait(0.25)
+        task.wait(1.0)
         pcall(S.recoverFarmCamera)
     end
 end)
@@ -15649,7 +15651,7 @@ function S.autofarmUnderMinePass(opts)
     S.touchMiningBusyHeartbeat()
     Autofarm._oreHuntMode = true
     local huntRange = tonumber(opts.range) or (S.isScrapGoldPhase() and 200 or S.getAutofarmOreHuntRange())
-    local maxSeconds = tonumber(opts.seconds) or (S.isScrapGoldPhase() and 8 or 20)
+    local maxSeconds = tonumber(opts.seconds) or (S.isScrapGoldPhase() and 8 or 16)
     local visitGen = Autofarm._visitGen or Autofarm._cycleGen
     local savedDistance = Autofarm.distance or S.syncAutofarmDistanceFromRoot()
     local depth = tonumber(Autofarm.oreUnderDepth) or 11
@@ -15809,7 +15811,7 @@ function S.autofarmUnderMinePass(opts)
                         break
                     end
                 end
-                task.wait(0.08)
+                task.wait(0.06)
             end
 
             if startedMineable and not S.isOreStillMineable(ore) then
@@ -15829,7 +15831,7 @@ function S.autofarmUnderMinePass(opts)
                 if S.isBagFull() then
                     break
                 end
-                task.wait(0.04)
+                task.wait(0.025)
             else
                 S.markOreSkip(ore, 20)
             end
@@ -26656,13 +26658,13 @@ function S.settleMinedBarDrops(breakPos)
         local elapsed = os.clock() - started
         -- Require a quiet period with no registered bar remaining. A longer
         -- hard cap prevents one uncollectable item from freezing Auto Mine.
-        if elapsed >= 1.5 and not pendingBar
-            and os.clock() - lastPendingAt >= 1.25
-            and os.clock() - lastPickupAt >= 1.0 then
+        if elapsed >= 1.0 and not pendingBar
+            and os.clock() - lastPendingAt >= 0.8
+            and os.clock() - lastPickupAt >= 0.65 then
             break
         end
-        task.wait(0.12)
-    until os.clock() - started >= 7.5
+        task.wait(0.08)
+    until os.clock() - started >= 4.5
 
     return total
 end
