@@ -12343,8 +12343,18 @@ function S.recoverFarmCamera()
         A.count, A.orig, A.touched = 0, nil, false
     end
 
+    -- Do not teleport the camera CFrame to a computed world position here.
+    -- During character teleports/root replication that position can briefly be
+    -- stale or invalid, which is what sends the view into the void. Rebind the
+    -- Roblox camera controller to the live Humanoid and let it rebuild the view.
+    local rootPos = root.Position
+    if math.abs(rootPos.X) > 100000 or math.abs(rootPos.Y) > 100000
+        or math.abs(rootPos.Z) > 100000 then
+        return false
+    end
+
     local cameraPos = cam.CFrame.Position
-    local offset = cameraPos - root.Position
+    local offset = cameraPos - rootPos
     local detached = offset.Magnitude > 160 or math.abs(offset.Y) > 110
         or cam.CameraSubject ~= hum or cam.CameraType == Enum.CameraType.Scriptable
 
@@ -12355,10 +12365,6 @@ function S.recoverFarmCamera()
     pcall(function()
         cam.CameraType = Enum.CameraType.Custom
         cam.CameraSubject = hum
-        local focus = root.Position + Vector3.new(0, 2, 0)
-        local cameraPosition = root.Position + root.CFrame:VectorToWorldSpace(Vector3.new(0, 6, 14))
-        cam.CFrame = CFrame.lookAt(cameraPosition, focus)
-        cam.Focus = CFrame.new(focus)
     end)
     return true
 end
@@ -26551,14 +26557,14 @@ end
 if not S.AO_BARS.workspaceAddedConnection then
     S.AO_BARS.workspaceAddedConnection = Workspace.DescendantAdded:Connect(function(instance)
         task.spawn(function()
-            for attempt = 1, 8 do
+            for attempt = 1, 24 do
                 if S._unloading or not instance or not instance.Parent then return end
                 local item = S.resolveWorldBarItem(instance)
                 if item then
                     S.registerNewMinedBar(item)
                     if S.AO_BARS.seen[item] or S.AO_BARS.mined[item] then return end
                 end
-                task.wait(0.12)
+                task.wait(0.15)
             end
         end)
     end)
@@ -26596,9 +26602,12 @@ function S.settleMinedBarDrops(breakPos)
 
     local started = os.clock()
     local lastPickupAt = started
+    local lastPendingAt = started
     local total = 0
-    local range = math.max(S.getAutofarmLootRange(), 800)
+    local range = math.max(S.getAutofarmLootRange(), 1200)
 
+    -- Give delayed bar drops time to replicate, register, and be picked up.
+    -- The next ore is not selected until this collection phase settles.
     repeat
         if S._unloading or not AO.owned or AO.autoCollect == false or not Autofarm.enabled then
             break
@@ -26619,17 +26628,22 @@ function S.settleMinedBarDrops(breakPos)
                 local pos = S.getItemPosition(item)
                 if pos then
                     pendingBar = true
+                    lastPendingAt = os.clock()
                     break
                 end
             end
         end
 
         local elapsed = os.clock() - started
-        if elapsed >= 1.1 and not pendingBar and os.clock() - lastPickupAt >= 0.7 then
+        -- Require a quiet period with no registered bar remaining. A longer
+        -- hard cap prevents one uncollectable item from freezing Auto Mine.
+        if elapsed >= 1.5 and not pendingBar
+            and os.clock() - lastPendingAt >= 1.25
+            and os.clock() - lastPickupAt >= 1.0 then
             break
         end
-        task.wait(0.1)
-    until os.clock() - started >= 3.5
+        task.wait(0.12)
+    until os.clock() - started >= 7.5
 
     return total
 end
