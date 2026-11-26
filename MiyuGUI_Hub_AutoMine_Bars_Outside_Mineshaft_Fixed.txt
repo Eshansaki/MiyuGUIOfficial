@@ -26381,9 +26381,16 @@ function S.isSmeltedBarItem(item)
     end
     if hasRawOre and not categoryIsBar and not joined:find("bar", 1, true)
         and not joined:find("ingot", 1, true) and not joined:find("smelt", 1, true) then
-        return false
+        -- Some outdoor bar drops keep an Ore-like instance name but are explicitly
+        -- categorized by the game as a Bar. Trust that explicit category only.
+        if not (S.itemCategoryKey and S.itemCategoryKey(item) == "bar") then
+            return false
+        end
     end
-    return hasOreOrBar and not joined:find("barrel", 1, true)
+    if hasOreOrBar and not joined:find("barrel", 1, true) then
+        return true
+    end
+    return S.itemCategoryKey and S.itemCategoryKey(item) == "bar"
 end
 
 -- Strict test used by the loot filters: a real Iron / Gold BAR (never a raw ore, never gear).
@@ -26422,11 +26429,11 @@ function S.noteOreBroken(breakPos)
     if not (AO and AO.owned and AO.collectBars and typeof(breakPos) == "Vector3") then
         return
     end
+    -- Outdoor regions can spawn the bar in a separate drop container or offset it
+    -- from the ore's X/Z position. Associate by spawn time, not world distance.
     B.breakPos, B.breakAt = breakPos, os.clock()
-    -- Bars that showed up in the last moment before the break was noticed also count.
     for _, rec in ipairs(B.recent) do
-        if rec.item.Parent and os.clock() - rec.t <= 2
-            and S.getFlatDistanceBetweenPositions(rec.pos, breakPos) <= (AO.barRadius or 180) then
+        if rec.item and rec.item.Parent and os.clock() - rec.t <= 3 then
             B.mined[rec.item] = true
         end
     end
@@ -26445,13 +26452,16 @@ end
 
 function S.resolveWorldBarItem(instance)
     local current = instance
+    local best = nil
+    -- Prefer the outer item model over an inner mesh/part named IronBar or GoldBar;
+    -- the game interaction is normally attached to the item model.
     while current and current ~= Workspace do
         if S.isSmeltedBarItem(current) then
-            return current
+            best = current
         end
         current = current.Parent
     end
-    return nil
+    return best
 end
 
 function S.registerNewMinedBar(item)
@@ -26460,29 +26470,34 @@ function S.registerNewMinedBar(item)
         or B.seen[item] or not S.isSmeltedBarItem(item) then
         return
     end
-    -- DescendantAdded can fire for the bar model before its physical parts have
-    -- replicated. Do NOT mark it seen until it has a usable world position;
-    -- otherwise the later part-added event can never register the bar.
+    -- Some outdoor drops are parented first and receive their final name,
+    -- attributes, and parts a moment later. Register only after position exists.
     local pos = S.getItemPosition(item)
     if not pos then return end
     B.seen[item] = true
     local now = os.clock()
-    if B.breakPos and now - B.breakAt <= (AO.barWindow or 12)
-        and S.getFlatDistanceBetweenPositions(pos, B.breakPos) <= (AO.barRadius or 180) then
+    if B.breakAt > 0 and now - B.breakAt <= (AO.barWindow or 20) then
+        -- Time-window association works across outdoor folders and elevation changes.
         B.mined[item] = true
     else
         B.recent[#B.recent + 1] = { item = item, t = now, pos = pos }
     end
 end
 
--- Listen to all Workspace descendants, not just Workspace.Items. Outdoor regions
--- use different containers for dropped loot, so an Items-only scan misses their bars.
+-- Outdoor drops may be renamed or receive attributes after they are parented.
+-- Retry resolving the item ancestor briefly instead of relying on one DescendantAdded tick.
 if not S.AO_BARS.workspaceAddedConnection then
     S.AO_BARS.workspaceAddedConnection = Workspace.DescendantAdded:Connect(function(instance)
-        task.defer(function()
-            if S._unloading then return end
-            local item = S.resolveWorldBarItem(instance)
-            if item then S.registerNewMinedBar(item) end
+        task.spawn(function()
+            for attempt = 1, 8 do
+                if S._unloading or not instance or not instance.Parent then return end
+                local item = S.resolveWorldBarItem(instance)
+                if item then
+                    S.registerNewMinedBar(item)
+                    if S.AO_BARS.seen[item] or S.AO_BARS.mined[item] then return end
+                end
+                task.wait(0.12)
+            end
         end)
     end)
 end
@@ -26540,7 +26555,7 @@ function S.settleMinedBarDrops(breakPos)
         for item in pairs(B.mined) do
             if item and item.Parent and S.isSmeltedBarItem(item) then
                 local pos = S.getItemPosition(item)
-                if pos and S.getFlatDistanceBetweenPositions(pos, breakPos) <= (AO.barRadius or 180) then
+                if pos then
                     pendingBar = true
                     break
                 end
