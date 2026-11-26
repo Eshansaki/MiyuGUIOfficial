@@ -11294,30 +11294,44 @@ function S.collectWorldOreDrops(range, barsOnly)
     range = tonumber(range) or 800
     local list = {}
     local added = {}
-    local function consider(item)
+    local function consider(item, globalBarScan)
         if not item or added[item] then return end
-        -- Auto Mine collects selected gems and mined Iron/Gold bar variants,
-        -- but never picks up raw ore drops. Other callers retain legacy behavior.
+        -- Auto Mine collects selected gems plus every recognized smelted bar.
+        -- Bars bypass the normal loot radius so naturally generated/old bars in
+        -- distant map areas and mineshafts are still queued for pickup.
+        local isBar = S.isMinedBarDrop(item)
         local eligible = barsOnly == true
-            and (S.isMinedBarDrop(item) or S.isSelectedGemDropItem(item))
-            or (barsOnly ~= true and (S.isSelectedOreDropItem(item) or S.isMinedBarDrop(item)))
+            and (isBar or S.isSelectedGemDropItem(item))
+            or (barsOnly ~= true and (S.isSelectedOreDropItem(item) or isBar))
         if eligible then
             local pos = S.getItemPosition(item)
             if pos then
                 local dist = S.getFlatDistanceFromPosition(pos)
-                if dist <= range then
+                if isBar or dist <= range then
                     added[item] = true
-                    table.insert(list, { item = item, dist = dist })
+                    table.insert(list, { item = item, dist = dist, globalBar = isBar })
                 end
             end
         end
     end
     S.forEachWorldLootItem(consider)
-    -- Some outdoor regions parent dropped bars under region-specific folders,
-    -- not Workspace.Items. The bar watcher records those exact instances here.
-    if barsOnly == true and S.AO_BARS and S.AO_BARS.mined then
-        for item in pairs(S.AO_BARS.mined) do
-            consider(item)
+
+    if barsOnly == true then
+        -- Search the full Workspace, not just Workspace.Items or recent drop
+        -- registrations. Resolve nested parts back to the complete bar item.
+        -- This also finds naturally generated bars and bars that have sat in
+        -- loaded mineshafts/regions for an arbitrary amount of time.
+        for _, descendant in ipairs(Workspace:GetDescendants()) do
+            if S.isSmeltedBarItem(descendant) then
+                local item = S.resolveWorldBarItem(descendant) or descendant
+                consider(item, true)
+            end
+        end
+        -- Keep explicitly tracked outdoor items as a fallback for custom folders.
+        if S.AO_BARS and S.AO_BARS.mined then
+            for item in pairs(S.AO_BARS.mined) do
+                consider(item, true)
+            end
         end
     end
     table.sort(list, function(a, b)
@@ -26429,7 +26443,8 @@ function S.isSmeltedBarItem(item)
     local joined = string.lower(table.concat(names, " ")):gsub("[^%a]", "")
     local hasIron = joined:find("iron", 1, true) ~= nil
     local hasGold = joined:find("gold", 1, true) ~= nil
-    if not (hasIron or hasGold) then return false end
+    local hasCopper = joined:find("copper", 1, true) ~= nil
+    if not (hasIron or hasGold or hasCopper) then return false end
     -- Smelted Iron/Gold drops may be named simply Iron/Gold, or IronOre/GoldOre/IronBar/GoldBar.
     -- Exclude unrelated objects whose display names merely contain the metal word.
     local hasOreOrBar = joined == "iron" or joined == "gold"
@@ -26508,11 +26523,15 @@ function S.noteOreBroken(breakPos)
 end
 
 function S.isMinedBarDrop(item)
-    local AO, B = S.AutoOres, S.AO_BARS
-    if not (AO and AO.owned and AO.collectBars and AO.autoCollect ~= false) or not item or not item.Parent then
+    local AO = S.AutoOres
+    if not (AO and AO.owned and AO.collectBars and AO.autoCollect ~= false)
+        or not item or not item.Parent then
         return false
     end
-    if B.mined[item] ~= true or not S.isSmeltedBarItem(item) then
+    -- Collect every recognized smelted bar already present in Workspace:
+    -- mined drops, naturally generated bars, and old bars left anywhere on the map.
+    -- Do not require a recent ore break or membership in AO_BARS.mined.
+    if not S.isSmeltedBarItem(item) then
         return false
     end
     return not S.isItemInTruckZone(item)
