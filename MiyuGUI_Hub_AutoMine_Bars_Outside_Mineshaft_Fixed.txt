@@ -12310,6 +12310,68 @@ task.spawn(function()
     end
 end)
 
+-- Shared camera recovery for both standalone Auto Scrap and Auto Mine.
+-- Character teleports can leave the Custom camera following the previous
+-- world position even though CameraSubject still points at a valid Humanoid.
+-- Only intervene when the camera is genuinely detached; do not fight normal
+-- player camera movement or a currently-running prompt camera aim.
+function S.recoverFarmCamera()
+    local scrapActive = (Autofarm and Autofarm.scrapSweep == true)
+        or (S.ScrapSweep and S.ScrapSweep.owned == true)
+    local mineActive = (S.AutoOres and S.AutoOres.owned == true)
+        or (Autofarm and Autofarm.oreUnderEnabled == true and Autofarm.enabled == true)
+    if not (scrapActive or mineActive) then
+        return false
+    end
+
+    local cam = Workspace.CurrentCamera
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local root = S.getRoot()
+    if not cam or not hum or not root then
+        return false
+    end
+
+    local A = S._camAim
+    local aimFresh = A and (A.count or 0) > 0 and (os.clock() - (A.lastAt or 0)) <= 1.0
+    if aimFresh then
+        return false
+    end
+
+    -- A prompt aim that stopped updating is stale; clear its bookkeeping.
+    if A and ((A.count or 0) > 0 or A.touched) then
+        A.count, A.orig, A.touched = 0, nil, false
+    end
+
+    local cameraPos = cam.CFrame.Position
+    local offset = cameraPos - root.Position
+    local detached = offset.Magnitude > 160 or math.abs(offset.Y) > 110
+        or cam.CameraSubject ~= hum or cam.CameraType == Enum.CameraType.Scriptable
+
+    if not detached then
+        return false
+    end
+
+    pcall(function()
+        cam.CameraType = Enum.CameraType.Custom
+        cam.CameraSubject = hum
+        local focus = root.Position + Vector3.new(0, 2, 0)
+        local cameraPosition = root.Position + root.CFrame:VectorToWorldSpace(Vector3.new(0, 6, 14))
+        cam.CFrame = CFrame.lookAt(cameraPosition, focus)
+        cam.Focus = CFrame.new(focus)
+    end)
+    return true
+end
+
+-- Check continuously while either collector is active so both modes recover
+-- after teleports, pickup interactions, drill drops, and mine transitions.
+task.spawn(function()
+    while not S._unloading do
+        task.wait(0.25)
+        pcall(S.recoverFarmCamera)
+    end
+end)
+
 -- Soften prompt eligibility for hold only. Never touch HoldDuration.
 function S.preparePromptsForHold(prompts)
     local backup = {}
@@ -31090,16 +31152,8 @@ function S.scrapPickItemF(item)
     -- Rebind the camera to the current Humanoid/root after every Auto Scrap pickup
     -- when the drill-drop destination is active.
     pcall(function()
-        local current = Workspace.CurrentCamera
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if current and Autofarm.scrapSweep == true and S.isDropInDrillMode() then
-            current.CameraType = Enum.CameraType.Custom
-            if hum then current.CameraSubject = hum end
-            S.fixCamera()
-        elseif current and current.CameraType == Enum.CameraType.Scriptable then
-            current.CameraType = Enum.CameraType.Custom
-            if hum then current.CameraSubject = hum end
+        if Autofarm.scrapSweep == true then
+            S.recoverFarmCamera()
         end
     end)
     if not ok then warn("[MiyuGUI][AutoScrap] pickup error:", res); return false end
