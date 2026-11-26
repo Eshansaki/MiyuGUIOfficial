@@ -11293,7 +11293,9 @@ end
 function S.collectWorldOreDrops(range, barsOnly)
     range = tonumber(range) or 800
     local list = {}
-    S.forEachWorldLootItem(function(item)
+    local added = {}
+    local function consider(item)
+        if not item or added[item] then return end
         -- Auto Mine collects selected gems and mined Iron/Gold bar variants,
         -- but never picks up raw ore drops. Other callers retain legacy behavior.
         local eligible = barsOnly == true
@@ -11304,11 +11306,20 @@ function S.collectWorldOreDrops(range, barsOnly)
             if pos then
                 local dist = S.getFlatDistanceFromPosition(pos)
                 if dist <= range then
+                    added[item] = true
                     table.insert(list, { item = item, dist = dist })
                 end
             end
         end
-    end)
+    end
+    S.forEachWorldLootItem(consider)
+    -- Some outdoor regions parent dropped bars under region-specific folders,
+    -- not Workspace.Items. The bar watcher records those exact instances here.
+    if barsOnly == true and S.AO_BARS and S.AO_BARS.mined then
+        for item in pairs(S.AO_BARS.mined) do
+            consider(item)
+        end
+    end
     table.sort(list, function(a, b)
         return a.dist < b.dist
     end)
@@ -26354,14 +26365,23 @@ function S.isSmeltedBarItem(item)
     -- Smelted Iron/Gold drops may be named simply Iron/Gold, or IronOre/GoldOre/IronBar/GoldBar.
     -- Exclude unrelated objects whose display names merely contain the metal word.
     local hasOreOrBar = joined == "iron" or joined == "gold"
-        or joined:find("ore", 1, true) ~= nil or joined:find("bar", 1, true) ~= nil
-    if not hasOreOrBar then
-        for _, attr in ipairs({ "Class", "ItemType", "Type", "Category", "DisplayCategory" }) do
-            local v = string.lower(tostring(item:GetAttribute(attr) or ""))
-            if v:find("ore", 1, true) or v:find("bar", 1, true) or v:find("smelt", 1, true) then
-                hasOreOrBar = true; break
-            end
+        or joined:find("bar", 1, true) ~= nil
+        or joined:find("ingot", 1, true) ~= nil
+        or joined:find("smelt", 1, true) ~= nil
+    local hasRawOre = joined:find("ore", 1, true) ~= nil
+    local categoryIsBar = false
+    for _, attr in ipairs({ "Class", "ItemType", "Type", "Category", "DisplayCategory" }) do
+        local v = string.lower(tostring(item:GetAttribute(attr) or ""))
+        if v:find("bar", 1, true) or v:find("ingot", 1, true) or v:find("smelt", 1, true) then
+            hasOreOrBar = true
+            categoryIsBar = true
+        elseif v:find("ore", 1, true) then
+            hasRawOre = true
         end
+    end
+    if hasRawOre and not categoryIsBar and not joined:find("bar", 1, true)
+        and not joined:find("ingot", 1, true) and not joined:find("smelt", 1, true) then
+        return false
     end
     return hasOreOrBar and not joined:find("barrel", 1, true)
 end
@@ -26406,7 +26426,7 @@ function S.noteOreBroken(breakPos)
     -- Bars that showed up in the last moment before the break was noticed also count.
     for _, rec in ipairs(B.recent) do
         if rec.item.Parent and os.clock() - rec.t <= 2
-            and S.getFlatDistanceBetweenPositions(rec.pos, breakPos) <= (AO.barRadius or 100) then
+            and S.getFlatDistanceBetweenPositions(rec.pos, breakPos) <= (AO.barRadius or 180) then
             B.mined[rec.item] = true
         end
     end
@@ -26423,32 +26443,65 @@ function S.isMinedBarDrop(item)
     return not S.isItemInTruckZone(item)
 end
 
+function S.resolveWorldBarItem(instance)
+    local current = instance
+    while current and current ~= Workspace do
+        if S.isSmeltedBarItem(current) then
+            return current
+        end
+        current = current.Parent
+    end
+    return nil
+end
+
+function S.registerNewMinedBar(item)
+    local AO, B = S.AutoOres, S.AO_BARS
+    if not (AO and AO.owned and AO.collectBars and item and item.Parent)
+        or B.seen[item] or not S.isSmeltedBarItem(item) then
+        return
+    end
+    -- DescendantAdded can fire for the bar model before its physical parts have
+    -- replicated. Do NOT mark it seen until it has a usable world position;
+    -- otherwise the later part-added event can never register the bar.
+    local pos = S.getItemPosition(item)
+    if not pos then return end
+    B.seen[item] = true
+    local now = os.clock()
+    if B.breakPos and now - B.breakAt <= (AO.barWindow or 12)
+        and S.getFlatDistanceBetweenPositions(pos, B.breakPos) <= (AO.barRadius or 180) then
+        B.mined[item] = true
+    else
+        B.recent[#B.recent + 1] = { item = item, t = now, pos = pos }
+    end
+end
+
+-- Listen to all Workspace descendants, not just Workspace.Items. Outdoor regions
+-- use different containers for dropped loot, so an Items-only scan misses their bars.
+if not S.AO_BARS.workspaceAddedConnection then
+    S.AO_BARS.workspaceAddedConnection = Workspace.DescendantAdded:Connect(function(instance)
+        task.defer(function()
+            if S._unloading then return end
+            local item = S.resolveWorldBarItem(instance)
+            if item then S.registerNewMinedBar(item) end
+        end)
+    end)
+end
+
 task.spawn(function()
     while not S._unloading do
-        task.wait(0.25)
+        task.wait(0.35)
         local AO, B = S.AutoOres, S.AO_BARS
         if AO and AO.owned and AO.collectBars then
             local folder = Workspace:FindFirstChild("Items")
             if folder then
-                local now = os.clock()
                 for _, item in ipairs(folder:GetChildren()) do
-                    if not B.seen[item] and S.isSmeltedBarItem(item) then
-                        B.seen[item] = true
-                        local pos = S.getItemPosition(item)
-                        if pos then
-                            if B.breakPos and now - B.breakAt <= (AO.barWindow or 8)
-                                and S.getFlatDistanceBetweenPositions(pos, B.breakPos) <= (AO.barRadius or 100) then
-                                B.mined[item] = true
-                            else
-                                B.recent[#B.recent + 1] = { item = item, t = now, pos = pos }
-                            end
-                        end
-                    end
+                    S.registerNewMinedBar(item)
                 end
-                for i = #B.recent, 1, -1 do
-                    if now - B.recent[i].t > 4 or not B.recent[i].item.Parent then
-                        table.remove(B.recent, i)
-                    end
+            end
+            local now = os.clock()
+            for i = #B.recent, 1, -1 do
+                if now - B.recent[i].t > 12 or not B.recent[i].item.Parent then
+                    table.remove(B.recent, i)
                 end
             end
         end
@@ -26487,7 +26540,7 @@ function S.settleMinedBarDrops(breakPos)
         for item in pairs(B.mined) do
             if item and item.Parent and S.isSmeltedBarItem(item) then
                 local pos = S.getItemPosition(item)
-                if pos and S.getFlatDistanceBetweenPositions(pos, breakPos) <= (AO.barRadius or 100) then
+                if pos and S.getFlatDistanceBetweenPositions(pos, breakPos) <= (AO.barRadius or 180) then
                     pendingBar = true
                     break
                 end
@@ -26514,8 +26567,8 @@ S.AutoOres = S.AutoOres or {
     autoCollect = true, -- collect selected gems and smelted Iron/Gold bars; skip raw ores
     _lastSwap = 0,
     types = { "Coal", "Copper", "Gold", "Diamond", "Ruby", "Emerald", "HeartGem" },
-    barWindow = 8,
-    barRadius = 100,
+    barWindow = 20,
+    barRadius = 300,
 }
 -- Smelted Iron/Gold bars from mined ores are part of Auto Collect Mined Ores/Gems.
 -- This is intentionally always enabled; there is no separate user-facing toggle.
@@ -30485,9 +30538,12 @@ function S.pickupInGame(item)
     if not item or not item.Parent then
         return false
     end
-    local itemsFolder = Workspace:FindFirstChild("Items")
+    -- Dropped loot can live in region-specific Workspace folders outside
+    -- Workspace.Items (notably in outdoor areas). Treat it as collected only
+    -- after it actually leaves Workspace, not merely because it is outside Items.
+    local wasInWorkspace = item:IsDescendantOf(Workspace)
     local function gone()
-        return not item.Parent or (itemsFolder ~= nil and not item:IsDescendantOf(itemsFolder))
+        return not item.Parent or (wasInWorkspace and not item:IsDescendantOf(Workspace))
     end
     local P = S.ScrapPick or {}
     local prevPin, prevY = Autofarm._mineHoldPos, Autofarm._gatePinY
